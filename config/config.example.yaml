@@ -1,0 +1,34 @@
+service:
+  http_addr: ":8080"
+database:
+  url: "${PUSH_DATABASE_URL}"
+rabbitmq:
+  url: "${PUSH_RABBITMQ_URL}"
+  command_exchange: push.commands
+  command_queue: push.commands.queue
+  routing_key: push.commands.v1
+  dlq_exchange: push.dlq
+  dlq_queue: push.dlq.queue
+  events_exchange: push.delivery.events
+  prefetch: 50
+  max_retries: 5
+providers:
+  fcm:
+    enabled: false
+    project_id: "${FCM_PROJECT_ID}"
+    credentials: "file:/run/secrets/fcm-service-account.json"
+  apns:
+    enabled: false
+    team_id: "${APNS_TEAM_ID}"
+    key_id: "${APNS_KEY_ID}"
+    bundle_id: "${APNS_BUNDLE_ID}"
+    private_key: "file:/run/secrets/apns-auth-key.p8"
+  web_push:
+    enabled: true
+    public_key: "${WEB_PUSH_PUBLIC_KEY}"
+    private_key: "${WEB_PUSH_PRIVATE_KEY}"
+    subject: "mailto:admin@example.com"
+api_keys:
+  - name: unlim-core
+    value: "${PUSH_API_KEY}"
+    scopes: [devices:write, devices:read]

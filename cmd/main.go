@@ -1,164 +1,100 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
-	"log"
+	"context"
+	"errors"
+	"flag"
+	"log/slog"
+	"net/http"
 	"os"
-	"path/filepath"
-	"sync"
+	"os/signal"
+	"syscall"
 	"time"
 
-	"github.com/rabbitmq/amqp091-go"
-	"push-service/internal/config"
+	"github.com/onix-fun/push-service/internal/api"
+	"github.com/onix-fun/push-service/internal/config"
+	"github.com/onix-fun/push-service/internal/provider"
+	"github.com/onix-fun/push-service/internal/store"
+	"github.com/onix-fun/push-service/internal/worker"
 )
 
-type PushCommand struct {
-	EventID       string                 `json:"eventId"`
-	SourceEventID string                 `json:"sourceEventId"`
-	RecipientID   string                 `json:"recipientId"`
-	Type          string                 `json:"type"`
-	Title         string                 `json:"title"`
-	Body          string                 `json:"body"`
-	EntityType    string                 `json:"entityType,omitempty"`
-	EntityID      string                 `json:"entityId,omitempty"`
-	Data          map[string]interface{} `json:"data"`
-}
-
-type IdempotencyStore struct {
-	mu        sync.Mutex
-	delivered map[string]struct{}
-	file      *os.File
-}
-
-func openIdempotencyStore(path string) (*IdempotencyStore, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	store := &IdempotencyStore{delivered: map[string]struct{}{}, file: file}
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		store.delivered[scanner.Text()] = struct{}{}
-	}
-	if err := scanner.Err(); err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	return store, nil
-}
-
-func (s *IdempotencyStore) Contains(eventID string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, exists := s.delivered[eventID]
-	return exists
-}
-
-func (s *IdempotencyStore) MarkDelivered(eventID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, exists := s.delivered[eventID]; exists {
-		return nil
-	}
-	if _, err := s.file.WriteString(eventID + "\n"); err != nil {
-		return err
-	}
-	if err := s.file.Sync(); err != nil {
-		return err
-	}
-	s.delivered[eventID] = struct{}{}
-	return nil
-}
-
-func connectRabbitMQ(url string) (*amqp091.Connection, error) {
-	var conn *amqp091.Connection
-	var err error
-	for i := 0; i < 10; i++ {
-		conn, err = amqp091.Dial(url)
-		if err == nil {
-			return conn, nil
-		}
-		log.Printf("failed to connect to RabbitMQ, retrying in 3 seconds: %v", err)
-		time.Sleep(3 * time.Second)
-	}
-	return nil, err
-}
-
 func main() {
-	cfg := config.Load()
-	store, err := openIdempotencyStore(cfg.StateFile)
+	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if len(os.Args) < 2 {
+		log.Error("usage: push-service <serve|config>")
+		os.Exit(2)
+	}
+	if os.Args[1] == "config" && (len(os.Args) < 3 || os.Args[2] != "validate") {
+		log.Error("usage: push-service config validate --config=<path>")
+		os.Exit(2)
+	}
+	fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
+	path := fs.String("config", "config/config.example.yaml", "YAML config path")
+	role := fs.String("role", "all", "api, worker or all")
+	flagArgs := os.Args[2:]
+	if os.Args[1] == "config" {
+		flagArgs = os.Args[3:]
+	}
+	_ = fs.Parse(flagArgs)
+	cfg, err := config.Load(*path)
 	if err != nil {
-		log.Fatalf("failed to open idempotency store: %v", err)
+		log.Error("invalid config", "error", err)
+		os.Exit(1)
 	}
-	defer store.file.Close()
-
-	conn, err := connectRabbitMQ(cfg.RabbitMQURL)
+	if os.Args[1] == "config" {
+		log.Info("config is valid")
+		return
+	}
+	if os.Args[1] != "serve" {
+		log.Error("unknown command")
+		os.Exit(2)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	s, err := store.Open(ctx, cfg.Database.URL)
 	if err != nil {
-		log.Fatalf("failed to connect to RabbitMQ after retries: %v", err)
+		log.Error("database unavailable", "error", err)
+		os.Exit(1)
 	}
-	defer conn.Close()
-
-	ch, err := conn.Channel()
-	if err != nil {
-		log.Fatalf("failed to open channel: %v", err)
-	}
-	defer ch.Close()
-
-	if err := ch.ExchangeDeclare("push.dlx", "direct", true, false, false, false, nil); err != nil {
-		log.Fatalf("failed to declare dead letter exchange: %v", err)
-	}
-	if _, err := ch.QueueDeclare("push.dlq", true, false, false, false, nil); err != nil {
-		log.Fatalf("failed to declare dead letter queue: %v", err)
-	}
-	if err := ch.QueueBind("push.dlq", "push.dlq", "push.dlx", false, nil); err != nil {
-		log.Fatalf("failed to bind dead letter queue: %v", err)
-	}
-	queue, err := ch.QueueDeclare(cfg.Queue, true, false, false, false, amqp091.Table{
-		"x-dead-letter-exchange":    "push.dlx",
-		"x-dead-letter-routing-key": "push.dlq",
-	})
-	if err != nil {
-		log.Fatalf("failed to declare queue: %v", err)
-	}
-	if err := ch.Qos(10, 0, false); err != nil {
-		log.Fatalf("failed to configure qos: %v", err)
-	}
-	messages, err := ch.Consume(queue.Name, "", false, false, false, false, nil)
-	if err != nil {
-		log.Fatalf("failed to register consumer: %v", err)
-	}
-
-	log.Printf("push-service stub started; waiting for commands")
-	for delivery := range messages {
-		var command PushCommand
-		if err := json.Unmarshal(delivery.Body, &command); err != nil {
-			log.Printf("invalid push command JSON: %v", err)
-			_ = delivery.Nack(false, false)
-			continue
+	defer s.Pool.Close()
+	errs := make(chan error, 2)
+	if *role == "all" || *role == "worker" {
+		gateway, err := provider.New(ctx, cfg.Providers)
+		if err != nil {
+			log.Error("provider configuration failed", "error", err)
+			os.Exit(1)
 		}
-		if command.EventID == "" || command.RecipientID == "" || command.Type == "" || command.Title == "" || command.Body == "" {
-			log.Printf("invalid push command: required fields are missing")
-			_ = delivery.Nack(false, false)
-			continue
-		}
-		if store.Contains(command.EventID) {
-			_ = delivery.Ack(false)
-			continue
-		}
-
-		log.Printf(
-			"push delivered by stub eventId=%s recipientId=%s type=%s entityType=%s entityId=%s",
-			command.EventID, command.RecipientID, command.Type, command.EntityType, command.EntityID,
-		)
-		if err := store.MarkDelivered(command.EventID); err != nil {
-			log.Printf("failed to persist delivered event: %v", err)
-			_ = delivery.Nack(false, true)
-			continue
-		}
-		_ = delivery.Ack(false)
+		go func() { errs <- worker.New(cfg.RabbitMQ, s, gateway, log).Run(ctx) }()
+	}
+	var server *http.Server
+	if *role == "all" || *role == "api" {
+		mux := http.NewServeMux()
+		mux.Handle("/", api.Handler(s, cfg.APIKeys))
+		mux.HandleFunc("/livez", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
+		mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+			if s.Pool.Ping(r.Context()) != nil {
+				http.Error(w, "not ready", 503)
+				return
+			}
+			w.WriteHeader(200)
+		})
+		mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("push_service_up 1\n")) })
+		server = &http.Server{Addr: cfg.Service.HTTPAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			err := server.ListenAndServe()
+			if !errors.Is(err, http.ErrServerClosed) {
+				errs <- err
+			}
+		}()
+	}
+	select {
+	case <-ctx.Done():
+	case err := <-errs:
+		log.Error("service stopped", "error", err)
+	}
+	if server != nil {
+		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdown)
 	}
 }
