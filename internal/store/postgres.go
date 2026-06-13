@@ -16,26 +16,7 @@ func Open(ctx context.Context, url string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{Pool: pool}
-	_, err = pool.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS push_devices (
- id TEXT PRIMARY KEY, recipient_id TEXT NOT NULL, provider TEXT NOT NULL, token TEXT NOT NULL,
- active BOOLEAN NOT NULL DEFAULT TRUE, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
- UNIQUE(provider, token)
-);
-CREATE INDEX IF NOT EXISTS push_devices_recipient_active ON push_devices(recipient_id, active);
-CREATE TABLE IF NOT EXISTS push_messages (
- message_id TEXT PRIMARY KEY, status TEXT NOT NULL, attempts BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE TABLE IF NOT EXISTS push_deliveries (
- message_id TEXT NOT NULL, device_id TEXT NOT NULL, status TEXT NOT NULL, error TEXT,
- updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY(message_id, device_id)
-);`)
-	if err != nil {
-		pool.Close()
-		return nil, err
-	}
-	return s, nil
+	return &Store{Pool: pool}, nil
 }
 
 func (s *Store) UpsertDevice(ctx context.Context, device model.Device) error {

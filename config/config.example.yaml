@@ -2,6 +2,8 @@ service:
   http_addr: ":8080"
 database:
   url: "${PUSH_DATABASE_URL}"
+  auto_migrate: true
+  migration_path: "file://migrations"
 rabbitmq:
   url: "${PUSH_RABBITMQ_URL}"
   command_exchange: push.commands

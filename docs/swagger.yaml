@@ -1,0 +1,108 @@
+basePath: /
+definitions:
+  github_com_onix-fun_push-service_internal_model.Device:
+    properties:
+      active:
+        type: boolean
+      id:
+        type: string
+      provider:
+        type: string
+      recipient_id:
+        type: string
+      token:
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact:
+    email: support@swagger.io
+    name: API Support
+    url: http://www.swagger.io/support
+  description: Service for managing device tokens and delivering push notifications
+    via FCM, APNS, and Web Push.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  termsOfService: http://swagger.io/terms/
+  title: Push Service API
+  version: "1.0"
+paths:
+  /v1/devices/{id}:
+    delete:
+      description: Marks a device as inactive so it no longer receives notifications.
+      parameters:
+      - description: Device ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+      security:
+      - ApiKeyAuth: []
+      summary: Deactivate a device
+      tags:
+      - devices
+    put:
+      consumes:
+      - application/json
+      description: Registers a new device token or updates an existing one for push
+        notifications.
+      parameters:
+      - description: Device ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Device details
+        in: body
+        name: device
+        required: true
+        schema:
+          $ref: '#/definitions/github_com_onix-fun_push-service_internal_model.Device'
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Invalid JSON or missing fields
+          schema:
+            type: string
+      security:
+      - ApiKeyAuth: []
+      summary: Register or update a device
+      tags:
+      - devices
+  /v1/recipients/{recipient}/devices:
+    get:
+      description: Returns a list of all devices registered for a specific recipient
+        ID.
+      parameters:
+      - description: Recipient ID
+        in: path
+        name: recipient
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              items:
+                $ref: '#/definitions/github_com_onix-fun_push-service_internal_model.Device'
+              type: array
+            type: object
+      security:
+      - ApiKeyAuth: []
+      summary: List devices for a recipient
+      tags:
+      - recipients
+securityDefinitions:
+  ApiKeyAuth:
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

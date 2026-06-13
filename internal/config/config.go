@@ -24,7 +24,9 @@ type ServiceConfig struct {
 }
 
 type DatabaseConfig struct {
-	URL string `yaml:"url"`
+	URL           string `yaml:"url"`
+	AutoMigrate   bool   `yaml:"auto_migrate"`
+	MigrationPath string `yaml:"migration_path"`
 }
 
 type RabbitMQConfig struct {
